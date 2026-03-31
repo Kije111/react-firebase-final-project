@@ -1,290 +1,165 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect } from "react";
 import { db } from "./firebase";
-import { collection, addDoc, onSnapshot, query, orderBy, deleteDoc, doc, writeBatch } from "firebase/firestore";
-import { Trash2, Send, Sparkles } from "lucide-react";
+import { collection, addDoc, onSnapshot, query, orderBy, deleteDoc, doc, updateDoc } from "firebase/firestore";
+import { Send, Trash2, Sparkles } from "lucide-react";
 
 function App() {
   const [note, setNote] = useState("");
   const [notes, setNotes] = useState([]);
-  const [isSaving, setIsSaving] = useState(false);
+  const [savingId, setSavingId] = useState(null);
   const [error, setError] = useState("");
-  const [isLoading, setIsLoading] = useState(true);
 
-  // Fetch notes in real-time with better error handling
-  useEffect(() => {
-    setIsLoading(true);
-    // Use a simpler query without ordering initially
-    const q = query(collection(db, "notes"), orderBy("timestamp", "desc"));
+  // Format time - super compact
+  const formatTime = (timestamp) => {
+    if (!timestamp) return "now";
+    let date = timestamp.toDate ? timestamp.toDate() : new Date(timestamp);
+    const now = new Date();
+    const diff = Math.floor((now - date) / 1000);
     
-    const unsubscribe = onSnapshot(q, 
-      (snapshot) => {
-        const notesData = snapshot.docs.map((doc) => ({
-          id: doc.id,
-          ...doc.data(),
-        }));
-        setNotes(notesData);
-        setIsLoading(false);
-        setError(""); // Clear any previous errors
-      }, 
-      (error) => {
-        console.error("Error fetching notes:", error);
-        setError("Failed to load notes. Retrying...");
-        setIsLoading(false);
-        
-        // Retry logic
-        setTimeout(() => {
-          console.log("Retrying connection...");
-        }, 3000);
-      }
-    );
+    if (diff < 60) return `${diff}s`;
+    if (diff < 3600) return `${Math.floor(diff / 60)}m`;
+    if (diff < 86400) return `${Math.floor(diff / 3600)}h`;
+    if (diff < 604800) return `${Math.floor(diff / 86400)}d`;
+    return date.toLocaleDateString();
+  };
 
+  // Real-time notes
+  useEffect(() => {
+    const q = query(collection(db, "notes"), orderBy("timestamp", "desc"));
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const notesData = snapshot.docs.map((doc) => ({
+        id: doc.id,
+        ...doc.data(),
+      }));
+      setNotes(notesData);
+    });
     return () => unsubscribe();
   }, []);
 
-  const saveNote = useCallback(async () => {
+  // INSTANT SAVE - appears immediately
+  const saveNote = async () => {
     if (!note.trim()) {
-      setError("Please enter a note");
+      setError("write something");
+      setTimeout(() => setError(""), 1500);
       return;
     }
 
-    setIsSaving(true);
+    const noteText = note.trim();
+    const tempId = Date.now().toString();
+    const timestamp = new Date();
+    
+    // INSTANT: Add to UI immediately
+    setNotes(prev => [{
+      id: tempId,
+      text: noteText,
+      timestamp: timestamp,
+      _pending: true
+    }, ...prev]);
+    
+    setNote(""); // Clear input instantly
+    setSavingId(tempId);
     setError("");
     
-    // Add timeout to prevent hanging
-    const timeoutPromise = new Promise((_, reject) => {
-      setTimeout(() => reject(new Error("Request timeout")), 10000);
-    });
-    
+    // Background save
     try {
-      const savePromise = addDoc(collection(db, "notes"), {
-        text: note.trim(),
-        timestamp: new Date(),
-        createdAt: Date.now(), // Add timestamp as number for faster indexing
+      const docRef = await addDoc(collection(db, "notes"), {
+        text: noteText,
+        timestamp: timestamp,
       });
-      
-      await Promise.race([savePromise, timeoutPromise]);
-      setNote(""); // Clear input immediately after success
-      
-      // Show success feedback
-      const successMessage = document.createElement("div");
-      successMessage.textContent = "✓ Saved!";
-      successMessage.style.cssText = `
-        position: fixed;
-        bottom: 20px;
-        right: 20px;
-        background: #4a3b2c;
-        color: white;
-        padding: 10px 20px;
-        border-radius: 0;
-        font-family: monospace;
-        z-index: 1000;
-        animation: fadeOut 2s forwards;
-      `;
-      document.body.appendChild(successMessage);
-      setTimeout(() => successMessage.remove(), 2000);
-      
-    } catch (error) {
-      console.error("Error saving note:", error);
-      if (error.message === "Request timeout") {
-        setError("Connection timeout. Please check your internet and try again.");
-      } else if (error.code === "permission-denied") {
-        setError("Permission denied. Check Firebase rules.");
-      } else {
-        setError("Failed to save note. Please try again.");
-      }
+      // Update the temp note with real ID
+      setNotes(prev => prev.map(n => 
+        n.id === tempId ? { ...n, id: docRef.id, _pending: false } : n
+      ));
+    } catch (err) {
+      // Remove failed note
+      setNotes(prev => prev.filter(n => n.id !== tempId));
+      setError("failed");
+      setTimeout(() => setError(""), 1500);
     } finally {
-      setIsSaving(false);
+      setSavingId(null);
     }
-  }, [note]);
+  };
 
-  const deleteNote = useCallback(async (id) => {
+  const deleteNote = async (id) => {
+    setNotes(prev => prev.filter(n => n.id !== id));
     try {
-      const timeoutPromise = new Promise((_, reject) => {
-        setTimeout(() => reject(new Error("Delete timeout")), 5000);
-      });
-      
-      const deletePromise = deleteDoc(doc(db, "notes", id));
-      await Promise.race([deletePromise, timeoutPromise]);
-    } catch (error) {
-      console.error("Error deleting note:", error);
-      setError("Failed to delete note");
-      setTimeout(() => setError(""), 3000);
+      await deleteDoc(doc(db, "notes", id));
+    } catch (err) {
+      console.error("Delete failed");
     }
-  }, []);
+  };
 
-  const handleKeyPress = useCallback((e) => {
-    if (e.key === "Enter" && !e.shiftKey && !isSaving) {
+  const handleKey = (e) => {
+    if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       saveNote();
     }
-  }, [saveNote, isSaving]);
-
-  // Add global styles
-  useEffect(() => {
-    const styleSheet = document.createElement("style");
-    styleSheet.textContent = `
-      @keyframes spin {
-        0% { transform: rotate(0deg); }
-        100% { transform: rotate(360deg); }
-      }
-      
-      @keyframes fadeOut {
-        0% { opacity: 1; }
-        70% { opacity: 1; }
-        100% { opacity: 0; visibility: hidden; }
-      }
-      
-      * {
-        margin: 0;
-        padding: 0;
-        box-sizing: border-box;
-      }
-      
-      body {
-        background-color: #f5efe7;
-        font-family: 'Courier New', 'Monaco', 'Menlo', monospace;
-      }
-      
-      input:focus {
-        border-color: #c2b5a4 !important;
-        outline: none;
-      }
-      
-      button:hover:not(:disabled) {
-        background-color: #e8e0d5 !important;
-        border-color: #b5a68f !important;
-        transform: translateY(-1px);
-      }
-      
-      button:active:not(:disabled) {
-        transform: translateY(0px);
-      }
-      
-      .note-card:hover {
-        background-color: #fefaf5 !important;
-        border-color: #d4c9bc !important;
-      }
-      
-      ::-webkit-scrollbar {
-        width: 8px;
-      }
-      
-      ::-webkit-scrollbar-track {
-        background: #e8e0d5;
-      }
-      
-      ::-webkit-scrollbar-thumb {
-        background: #d4c9bc;
-      }
-      
-      ::-webkit-scrollbar-thumb:hover {
-        background: #c2b5a4;
-      }
-    `;
-    document.head.appendChild(styleSheet);
-    
-    return () => {
-      document.head.removeChild(styleSheet);
-    };
-  }, []);
+  };
 
   return (
     <div style={styles.container}>
       <div style={styles.content}>
         {/* Header */}
         <div style={styles.header}>
-          <Sparkles style={styles.headerIcon} size={32} />
-          <h1 style={styles.title}>Notes App</h1>
-          <p style={styles.subtitle}>Share your thoughts with the world</p>
+          <Sparkles size={24} />
+          <h1 style={styles.title}>notes</h1>
         </div>
 
-        {/* Input Section */}
-        <div style={styles.inputSection}>
-          <div style={styles.inputWrapper}>
-            <input
-              type="text"
-              placeholder="What's on your mind?..."
-              value={note}
-              onChange={(e) => setNote(e.target.value)}
-              onKeyPress={handleKeyPress}
-              style={styles.input}
-              disabled={isSaving}
-            />
-            <button 
-              onClick={saveNote} 
-              style={{...styles.saveButton, ...(isSaving ? styles.saveButtonDisabled : {})}}
-              disabled={isSaving}
-            >
-              {isSaving ? (
-                <>
-                  <div style={styles.spinner} />
-                  <span style={styles.buttonText}>Saving...</span>
-                </>
-              ) : (
-                <>
-                  <Send size={20} />
-                  <span style={styles.buttonText}>Post</span>
-                </>
-              )}
-            </button>
-          </div>
-          
-          {error && (
-            <div style={styles.errorMessage}>
-              ⚠️ {error}
+        {/* Input */}
+        <div style={styles.inputArea}>
+          <input
+            type="text"
+            placeholder="write something..."
+            value={note}
+            onChange={(e) => setNote(e.target.value)}
+            onKeyPress={handleKey}
+            style={styles.input}
+          />
+          <button onClick={saveNote} style={styles.sendBtn}>
+            <Send size={18} />
+          </button>
+        </div>
+
+        {error && <div style={styles.error}>{error}</div>}
+
+        {/* Comments List */}
+        <div style={styles.list}>
+          {notes.length === 0 ? (
+            <div style={styles.empty}>
+              <p>✨ no notes yet</p>
+              <small>write something above</small>
             </div>
+          ) : (
+            notes.map((item) => (
+              <div key={item.id} style={styles.note}>
+                <div style={styles.noteContent}>
+                  <p style={styles.noteText}>
+                    {item.text}
+                    {savingId === item.id && <span style={styles.dot}>●</span>}
+                  </p>
+                  <span style={styles.time}>{formatTime(item.timestamp)}</span>
+                </div>
+                <button 
+                  onClick={() => deleteNote(item.id)} 
+                  style={styles.delete}
+                  disabled={savingId === item.id}
+                >
+                  <Trash2 size={14} />
+                </button>
+              </div>
+            ))
           )}
         </div>
-
-        {/* Live Comments Section */}
-        <div style={styles.notesSection}>
-          <div style={styles.sectionHeader}>
-            <h2 style={styles.sectionTitle}>
-              Live Comments
-              {notes.length > 0 && <span style={styles.noteCount}>({notes.length})</span>}
-              {isLoading && <span style={styles.loadingIndicator}> Loading...</span>}
-            </h2>
-          </div>
-
-          <div style={styles.notesList}>
-            {isLoading ? (
-              <div style={styles.emptyState}>
-                <div style={styles.spinnerLarge} />
-                <p style={styles.emptyText}>Loading comments...</p>
-              </div>
-            ) : notes.length === 0 ? (
-              <div style={styles.emptyState}>
-                <div style={styles.emptyIcon}>💭</div>
-                <p style={styles.emptyText}>No comments yet. Be the first to share!</p>
-              </div>
-            ) : (
-              notes.map((note) => (
-                <div key={note.id} style={styles.noteCard}>
-                  <div style={styles.noteContent}>
-                    <div style={styles.noteText}>{note.text}</div>
-                    <div style={styles.noteMeta}>
-                      <span style={styles.timestamp}>
-                        🕒 {note.timestamp?.toDate 
-                          ? new Date(note.timestamp.toDate()).toLocaleString()
-                          : note.createdAt 
-                            ? new Date(note.createdAt).toLocaleString()
-                            : "Just now"}
-                      </span>
-                    </div>
-                  </div>
-                  <button
-                    onClick={() => deleteNote(note.id)}
-                    style={styles.deleteButton}
-                    title="Delete note"
-                  >
-                    <Trash2 size={16} />
-                  </button>
-                </div>
-              ))
-            )}
-          </div>
-        </div>
       </div>
+
+      <style>{`
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #f5efe7; font-family: 'Courier New', monospace; }
+        button { cursor: pointer; background: none; border: none; }
+        ::-webkit-scrollbar { width: 4px; }
+        ::-webkit-scrollbar-track { background: #e8e0d5; }
+        ::-webkit-scrollbar-thumb { background: #d4c9bc; }
+      `}</style>
     </div>
   );
 }
@@ -292,215 +167,123 @@ function App() {
 const styles = {
   container: {
     minHeight: "100vh",
-    backgroundColor: "#f5efe7",
-    padding: "0",
-    margin: "0",
-    fontFamily: "'Courier New', 'Monaco', 'Menlo', monospace",
+    background: "#f5efe7",
+    display: "flex",
+    justifyContent: "center",
+    padding: "20px",
   },
   content: {
-    maxWidth: "900px",
-    margin: "0 auto",
-    backgroundColor: "#faf7f2",
+    width: "100%",
+    maxWidth: "600px",
+    background: "#faf7f2",
     boxShadow: "none",
-    overflow: "visible",
-    minHeight: "100vh",
   },
   header: {
-    backgroundColor: "#e8e0d5",
-    color: "#4a3b2c",
-    padding: "60px 30px",
+    padding: "30px 20px 20px",
     textAlign: "center",
-    borderBottom: "2px solid #d4c9bc",
-  },
-  headerIcon: {
-    marginBottom: "15px",
-    display: "inline-block",
-    color: "#8b7355",
+    borderBottom: "1px solid #e8e0d5",
   },
   title: {
-    margin: "0",
-    fontSize: "2.8em",
+    fontSize: "1.8rem",
     fontWeight: "normal",
-    letterSpacing: "-0.5px",
-    fontFamily: "'Courier New', 'Monaco', 'Menlo', monospace",
     color: "#4a3b2c",
+    marginTop: "8px",
+    letterSpacing: "-0.5px",
   },
-  subtitle: {
-    margin: "12px 0 0",
-    opacity: "0.8",
-    fontSize: "1.1em",
-    fontFamily: "'Courier New', 'Monaco', 'Menlo', monospace",
-    color: "#6b5a48",
-  },
-  inputSection: {
-    padding: "40px 30px",
-    borderBottom: "2px solid #e8e0d5",
-    backgroundColor: "#faf7f2",
-  },
-  inputWrapper: {
+  inputArea: {
+    padding: "20px",
     display: "flex",
-    gap: "15px",
-    alignItems: "flex-start",
+    gap: "10px",
+    borderBottom: "1px solid #e8e0d5",
   },
   input: {
     flex: 1,
-    padding: "14px 18px",
-    fontSize: "16px",
-    border: "2px solid #d4c9bc",
-    borderRadius: "0px",
-    outline: "none",
-    transition: "all 0.3s ease",
-    fontFamily: "'Courier New', 'Monaco', 'Menlo', monospace",
-    backgroundColor: "#ffffff",
-    color: "#4a3b2c",
-  },
-  saveButton: {
-    display: "flex",
-    alignItems: "center",
-    gap: "8px",
-    padding: "14px 28px",
-    backgroundColor: "#d4c9bc",
-    color: "#4a3b2c",
-    border: "2px solid #c2b5a4",
-    borderRadius: "0px",
-    cursor: "pointer",
-    fontSize: "16px",
-    fontWeight: "normal",
-    transition: "all 0.3s ease",
-    fontFamily: "'Courier New', 'Monaco', 'Menlo', monospace",
-  },
-  saveButtonDisabled: {
-    opacity: 0.6,
-    cursor: "not-allowed",
-  },
-  buttonText: {
-    marginLeft: "4px",
-  },
-  spinner: {
-    width: "20px",
-    height: "20px",
-    border: "2px solid rgba(74, 59, 44, 0.3)",
-    borderTop: "2px solid #4a3b2c",
-    borderRadius: "50%",
-    animation: "spin 0.8s linear infinite",
-  },
-  spinnerLarge: {
-    width: "40px",
-    height: "40px",
-    margin: "0 auto 20px",
-    border: "3px solid rgba(74, 59, 44, 0.3)",
-    borderTop: "3px solid #4a3b2c",
-    borderRadius: "50%",
-    animation: "spin 0.8s linear infinite",
-  },
-  errorMessage: {
-    marginTop: "15px",
-    padding: "12px",
-    backgroundColor: "#f5e6e6",
-    color: "#8b5a5a",
-    borderRadius: "0px",
+    padding: "10px 12px",
     fontSize: "14px",
-    textAlign: "center",
-    border: "2px solid #e0c9c9",
-    fontFamily: "'Courier New', 'Monaco', 'Menlo', monospace",
+    border: "1px solid #e0d5c8",
+    background: "white",
+    fontFamily: "inherit",
+    outline: "none",
   },
-  notesSection: {
-    padding: "40px 30px",
-    backgroundColor: "#faf7f2",
-  },
-  sectionHeader: {
-    marginBottom: "30px",
-    paddingBottom: "15px",
-    borderBottom: "2px solid #e8e0d5",
-  },
-  sectionTitle: {
-    margin: "0",
-    fontSize: "1.8em",
-    color: "#4a3b2c",
+  sendBtn: {
+    width: "40px",
+    background: "#e8e0d5",
+    border: "1px solid #d4c9bc",
     display: "flex",
     alignItems: "center",
-    gap: "10px",
-    fontWeight: "normal",
-    fontFamily: "'Courier New', 'Monaco', 'Menlo', monospace",
+    justifyContent: "center",
+    transition: "all 0.2s",
   },
-  noteCount: {
-    fontSize: "0.8em",
-    color: "#8b7355",
-    fontWeight: "normal",
-    marginLeft: "8px",
+  error: {
+    margin: "0 20px 10px",
+    padding: "8px",
+    background: "#fee",
+    color: "#c66",
+    fontSize: "12px",
+    textAlign: "center",
+    border: "1px solid #fcc",
   },
-  loadingIndicator: {
-    fontSize: "0.6em",
-    color: "#8b7355",
-    marginLeft: "10px",
-  },
-  notesList: {
-    display: "flex",
-    flexDirection: "column",
-    gap: "20px",
-    maxHeight: "600px",
+  list: {
+    padding: "20px",
+    maxHeight: "calc(100vh - 220px)",
     overflowY: "auto",
   },
-  noteCard: {
+  empty: {
+    textAlign: "center",
+    padding: "60px 20px",
+    color: "#b5a68f",
+  },
+  note: {
     display: "flex",
     justifyContent: "space-between",
     alignItems: "flex-start",
-    padding: "24px",
-    backgroundColor: "#ffffff",
-    transition: "all 0.3s ease",
-    border: "2px solid #e8e0d5",
-    borderRadius: "0px",
+    padding: "12px 0",
+    borderBottom: "1px solid #f0e8df",
   },
   noteContent: {
     flex: 1,
   },
   noteText: {
-    fontSize: "16px",
+    fontSize: "14px",
     color: "#4a3b2c",
-    lineHeight: "1.6",
-    marginBottom: "12px",
-    fontFamily: "'Courier New', 'Monaco', 'Menlo', monospace",
+    lineHeight: "1.4",
+    marginBottom: "6px",
     wordBreak: "break-word",
   },
-  noteMeta: {
-    display: "flex",
-    gap: "10px",
-    alignItems: "center",
-  },
-  timestamp: {
+  dot: {
+    marginLeft: "6px",
     fontSize: "12px",
     color: "#b5a68f",
-    fontFamily: "'Courier New', 'Monaco', 'Menlo', monospace",
+    animation: "pulse 1s infinite",
   },
-  deleteButton: {
-    padding: "8px",
-    backgroundColor: "transparent",
-    border: "2px solid #e8e0d5",
-    borderRadius: "0px",
-    cursor: "pointer",
-    color: "#b5a68f",
-    transition: "all 0.3s ease",
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-    marginLeft: "12px",
+  time: {
+    fontSize: "10px",
+    color: "#cbc1b2",
+    textTransform: "uppercase",
   },
-  emptyState: {
-    textAlign: "center",
-    padding: "80px 20px",
-    backgroundColor: "#ffffff",
-    border: "2px solid #e8e0d5",
-  },
-  emptyIcon: {
-    fontSize: "64px",
-    marginBottom: "20px",
-    opacity: 0.7,
-  },
-  emptyText: {
-    fontSize: "16px",
-    color: "#b5a68f",
-    fontFamily: "'Courier New', 'Monaco', 'Menlo', monospace",
+  delete: {
+    padding: "4px",
+    color: "#d4c9bc",
+    opacity: 0.6,
+    transition: "opacity 0.2s",
   },
 };
+
+// Add animation
+const styleSheet = document.createElement("style");
+styleSheet.textContent = `
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.3; }
+  }
+  button:hover:not(:disabled) {
+    background: #e0d5c8 !important;
+  }
+  .delete:hover {
+    opacity: 1 !important;
+    color: #c66 !important;
+  }
+`;
+document.head.appendChild(styleSheet);
 
 export default App;
