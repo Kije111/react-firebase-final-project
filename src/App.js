@@ -8,12 +8,13 @@ function App() {
   const [notes, setNotes] = useState([]);
   const [savingId, setSavingId] = useState(null);
   const [error, setError] = useState("");
+  const [isConnected, setIsConnected] = useState(false);
 
-  // Format time - super compact
+  // Format time - compact
   const formatTime = useCallback((timestamp) => {
     if (!timestamp) return "now";
     let date;
-    if (timestamp.toDate) {
+    if (timestamp?.toDate) {
       date = timestamp.toDate();
     } else if (timestamp instanceof Date) {
       date = timestamp;
@@ -31,16 +32,30 @@ function App() {
     return date.toLocaleDateString();
   }, []);
 
-  // Real-time notes
+  // Real-time notes from Firebase
   useEffect(() => {
+    console.log("📡 Connecting to Firebase...");
+    
     const q = query(collection(db, "notes"), orderBy("timestamp", "desc"));
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      const notesData = snapshot.docs.map((doc) => ({
-        id: doc.id,
-        ...doc.data(),
-      }));
-      setNotes(notesData);
-    });
+    
+    const unsubscribe = onSnapshot(q, 
+      (snapshot) => {
+        console.log("✅ Connected! Total notes:", snapshot.size);
+        setIsConnected(true);
+        const notesData = snapshot.docs.map((doc) => ({
+          id: doc.id,
+          ...doc.data(),
+        }));
+        setNotes(notesData);
+        setError("");
+      }, 
+      (error) => {
+        console.error("❌ Firebase Error:", error);
+        setIsConnected(false);
+        setError(`Connection error: ${error.message}`);
+      }
+    );
+
     return () => unsubscribe();
   }, []);
 
@@ -48,53 +63,34 @@ function App() {
   useEffect(() => {
     const style = document.createElement('style');
     style.textContent = `
-      * {
-        margin: 0;
-        padding: 0;
-        box-sizing: border-box;
-      }
-      
-      body {
-        background: #f5efe7;
-        font-family: 'Courier New', monospace;
-      }
-      
-      button {
-        cursor: pointer;
-        background: none;
-        border: none;
-      }
-      
-      ::-webkit-scrollbar {
-        width: 4px;
-      }
-      
-      ::-webkit-scrollbar-track {
-        background: #e8e0d5;
-      }
-      
-      ::-webkit-scrollbar-thumb {
-        background: #d4c9bc;
-      }
-      
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      body { background: #f5efe7; font-family: 'Courier New', monospace; }
+      button { cursor: pointer; background: none; border: none; }
+      ::-webkit-scrollbar { width: 4px; }
+      ::-webkit-scrollbar-track { background: #e8e0d5; }
+      ::-webkit-scrollbar-thumb { background: #d4c9bc; }
       @keyframes pulse {
         0%, 100% { opacity: 1; }
         50% { opacity: 0.3; }
       }
-      
-      button:hover:not(:disabled) {
-        background: #e0d5c8 !important;
+      button:hover:not(:disabled) { background: #e0d5c8 !important; }
+      .status-badge {
+        position: fixed;
+        bottom: 10px;
+        right: 10px;
+        padding: 4px 8px;
+        font-size: 10px;
+        border-radius: 0;
+        font-family: monospace;
       }
+      .connected { background: #4caf50; color: white; }
+      .disconnected { background: #f44336; color: white; }
     `;
     document.head.appendChild(style);
-    return () => {
-      if (style.parentNode) {
-        style.parentNode.removeChild(style);
-      }
-    };
+    return () => style.remove();
   }, []);
 
-  // INSTANT SAVE - appears immediately
+  // INSTANT SAVE
   const saveNote = useCallback(async () => {
     if (!note.trim()) {
       setError("write something");
@@ -106,32 +102,36 @@ function App() {
     const tempId = Date.now().toString();
     const timestamp = new Date();
     
-    // INSTANT: Add to UI immediately
+    console.log("💾 Saving note:", noteText);
+    
+    // Add to UI immediately
     setNotes(prev => [{
       id: tempId,
       text: noteText,
       timestamp: timestamp,
     }, ...prev]);
     
-    setNote(""); // Clear input instantly
+    setNote("");
     setSavingId(tempId);
     setError("");
     
-    // Background save
+    // Save to Firebase
     try {
       const docRef = await addDoc(collection(db, "notes"), {
         text: noteText,
         timestamp: timestamp,
       });
-      // Update the temp note with real ID
+      console.log("✅ Saved! ID:", docRef.id);
+      
+      // Update with real ID
       setNotes(prev => prev.map(n => 
         n.id === tempId ? { ...n, id: docRef.id } : n
       ));
     } catch (err) {
-      // Remove failed note
+      console.error("❌ Save failed:", err);
       setNotes(prev => prev.filter(n => n.id !== tempId));
-      setError("failed");
-      setTimeout(() => setError(""), 1500);
+      setError(`Failed: ${err.message}`);
+      setTimeout(() => setError(""), 3000);
     } finally {
       setSavingId(null);
     }
@@ -141,8 +141,11 @@ function App() {
     setNotes(prev => prev.filter(n => n.id !== id));
     try {
       await deleteDoc(doc(db, "notes", id));
+      console.log("✅ Deleted:", id);
     } catch (err) {
-      console.error("Delete failed");
+      console.error("❌ Delete failed:", err);
+      setError("Delete failed");
+      setTimeout(() => setError(""), 2000);
     }
   }, []);
 
@@ -316,6 +319,11 @@ function App() {
             ))
           )}
         </div>
+      </div>
+      
+      {/* Status indicator */}
+      <div className={`status-badge ${isConnected ? 'connected' : 'disconnected'}`}>
+        {isConnected ? '● Connected' : '○ Disconnected'}
       </div>
     </div>
   );
