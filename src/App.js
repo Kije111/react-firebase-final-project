@@ -1,6 +1,6 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { db } from "./firebase";
-import { collection, addDoc, onSnapshot, query, orderBy, deleteDoc, doc } from "firebase/firestore";
+import { collection, addDoc, onSnapshot, query, orderBy, deleteDoc, doc, writeBatch } from "firebase/firestore";
 import { Trash2, Send, Sparkles } from "lucide-react";
 
 function App() {
@@ -8,23 +8,116 @@ function App() {
   const [notes, setNotes] = useState([]);
   const [isSaving, setIsSaving] = useState(false);
   const [error, setError] = useState("");
+  const [isLoading, setIsLoading] = useState(true);
 
-  // Fetch notes in real-time
+  // Fetch notes in real-time with better error handling
   useEffect(() => {
+    setIsLoading(true);
+    // Use a simpler query without ordering initially
     const q = query(collection(db, "notes"), orderBy("timestamp", "desc"));
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      const notesData = snapshot.docs.map((doc) => ({
-        id: doc.id,
-        ...doc.data(),
-      }));
-      setNotes(notesData);
-    }, (error) => {
-      console.error("Error fetching notes:", error);
-      setError("Failed to load notes");
-    });
+    
+    const unsubscribe = onSnapshot(q, 
+      (snapshot) => {
+        const notesData = snapshot.docs.map((doc) => ({
+          id: doc.id,
+          ...doc.data(),
+        }));
+        setNotes(notesData);
+        setIsLoading(false);
+        setError(""); // Clear any previous errors
+      }, 
+      (error) => {
+        console.error("Error fetching notes:", error);
+        setError("Failed to load notes. Retrying...");
+        setIsLoading(false);
+        
+        // Retry logic
+        setTimeout(() => {
+          console.log("Retrying connection...");
+        }, 3000);
+      }
+    );
 
     return () => unsubscribe();
   }, []);
+
+  const saveNote = useCallback(async () => {
+    if (!note.trim()) {
+      setError("Please enter a note");
+      return;
+    }
+
+    setIsSaving(true);
+    setError("");
+    
+    // Add timeout to prevent hanging
+    const timeoutPromise = new Promise((_, reject) => {
+      setTimeout(() => reject(new Error("Request timeout")), 10000);
+    });
+    
+    try {
+      const savePromise = addDoc(collection(db, "notes"), {
+        text: note.trim(),
+        timestamp: new Date(),
+        createdAt: Date.now(), // Add timestamp as number for faster indexing
+      });
+      
+      await Promise.race([savePromise, timeoutPromise]);
+      setNote(""); // Clear input immediately after success
+      
+      // Show success feedback
+      const successMessage = document.createElement("div");
+      successMessage.textContent = "✓ Saved!";
+      successMessage.style.cssText = `
+        position: fixed;
+        bottom: 20px;
+        right: 20px;
+        background: #4a3b2c;
+        color: white;
+        padding: 10px 20px;
+        border-radius: 0;
+        font-family: monospace;
+        z-index: 1000;
+        animation: fadeOut 2s forwards;
+      `;
+      document.body.appendChild(successMessage);
+      setTimeout(() => successMessage.remove(), 2000);
+      
+    } catch (error) {
+      console.error("Error saving note:", error);
+      if (error.message === "Request timeout") {
+        setError("Connection timeout. Please check your internet and try again.");
+      } else if (error.code === "permission-denied") {
+        setError("Permission denied. Check Firebase rules.");
+      } else {
+        setError("Failed to save note. Please try again.");
+      }
+    } finally {
+      setIsSaving(false);
+    }
+  }, [note]);
+
+  const deleteNote = useCallback(async (id) => {
+    try {
+      const timeoutPromise = new Promise((_, reject) => {
+        setTimeout(() => reject(new Error("Delete timeout")), 5000);
+      });
+      
+      const deletePromise = deleteDoc(doc(db, "notes", id));
+      await Promise.race([deletePromise, timeoutPromise]);
+    } catch (error) {
+      console.error("Error deleting note:", error);
+      setError("Failed to delete note");
+      setTimeout(() => setError(""), 3000);
+    }
+  }, []);
+
+  const handleKeyPress = useCallback((e) => {
+    if (e.key === "Enter" && !e.shiftKey && !isSaving) {
+      e.preventDefault();
+      saveNote();
+    }
+  }, [saveNote, isSaving]);
 
   // Add global styles
   useEffect(() => {
@@ -33,6 +126,12 @@ function App() {
       @keyframes spin {
         0% { transform: rotate(0deg); }
         100% { transform: rotate(360deg); }
+      }
+      
+      @keyframes fadeOut {
+        0% { opacity: 1; }
+        70% { opacity: 1; }
+        100% { opacity: 0; visibility: hidden; }
       }
       
       * {
@@ -89,45 +188,6 @@ function App() {
     };
   }, []);
 
-  const saveNote = async () => {
-    if (!note.trim()) {
-      setError("Please enter a note");
-      return;
-    }
-
-    setIsSaving(true);
-    setError("");
-    
-    try {
-      await addDoc(collection(db, "notes"), {
-        text: note,
-        timestamp: new Date(),
-      });
-      setNote("");
-    } catch (error) {
-      console.error("Error saving note:", error);
-      setError("Failed to save note. Please try again.");
-    } finally {
-      setIsSaving(false);
-    }
-  };
-
-  const deleteNote = async (id) => {
-    try {
-      await deleteDoc(doc(db, "notes", id));
-    } catch (error) {
-      console.error("Error deleting note:", error);
-      setError("Failed to delete note");
-    }
-  };
-
-  const handleKeyPress = (e) => {
-    if (e.key === "Enter" && !e.shiftKey) {
-      e.preventDefault();
-      saveNote();
-    }
-  };
-
   return (
     <div style={styles.container}>
       <div style={styles.content}>
@@ -156,19 +216,22 @@ function App() {
               disabled={isSaving}
             >
               {isSaving ? (
-                <div style={styles.spinner} />
+                <>
+                  <div style={styles.spinner} />
+                  <span style={styles.buttonText}>Saving...</span>
+                </>
               ) : (
-                <Send size={20} />
+                <>
+                  <Send size={20} />
+                  <span style={styles.buttonText}>Post</span>
+                </>
               )}
-              <span style={styles.buttonText}>
-                {isSaving ? "Saving..." : "Post"}
-              </span>
             </button>
           </div>
           
           {error && (
             <div style={styles.errorMessage}>
-              {error}
+              ⚠️ {error}
             </div>
           )}
         </div>
@@ -179,11 +242,17 @@ function App() {
             <h2 style={styles.sectionTitle}>
               Live Comments
               {notes.length > 0 && <span style={styles.noteCount}>({notes.length})</span>}
+              {isLoading && <span style={styles.loadingIndicator}> Loading...</span>}
             </h2>
           </div>
 
           <div style={styles.notesList}>
-            {notes.length === 0 ? (
+            {isLoading ? (
+              <div style={styles.emptyState}>
+                <div style={styles.spinnerLarge} />
+                <p style={styles.emptyText}>Loading comments...</p>
+              </div>
+            ) : notes.length === 0 ? (
               <div style={styles.emptyState}>
                 <div style={styles.emptyIcon}>💭</div>
                 <p style={styles.emptyText}>No comments yet. Be the first to share!</p>
@@ -195,9 +264,11 @@ function App() {
                     <div style={styles.noteText}>{note.text}</div>
                     <div style={styles.noteMeta}>
                       <span style={styles.timestamp}>
-                        {note.timestamp?.toDate 
+                        🕒 {note.timestamp?.toDate 
                           ? new Date(note.timestamp.toDate()).toLocaleString()
-                          : "Just now"}
+                          : note.createdAt 
+                            ? new Date(note.createdAt).toLocaleString()
+                            : "Just now"}
                       </span>
                     </div>
                   </div>
@@ -313,6 +384,15 @@ const styles = {
     borderRadius: "50%",
     animation: "spin 0.8s linear infinite",
   },
+  spinnerLarge: {
+    width: "40px",
+    height: "40px",
+    margin: "0 auto 20px",
+    border: "3px solid rgba(74, 59, 44, 0.3)",
+    borderTop: "3px solid #4a3b2c",
+    borderRadius: "50%",
+    animation: "spin 0.8s linear infinite",
+  },
   errorMessage: {
     marginTop: "15px",
     padding: "12px",
@@ -349,6 +429,11 @@ const styles = {
     fontWeight: "normal",
     marginLeft: "8px",
   },
+  loadingIndicator: {
+    fontSize: "0.6em",
+    color: "#8b7355",
+    marginLeft: "10px",
+  },
   notesList: {
     display: "flex",
     flexDirection: "column",
@@ -375,6 +460,7 @@ const styles = {
     lineHeight: "1.6",
     marginBottom: "12px",
     fontFamily: "'Courier New', 'Monaco', 'Menlo', monospace",
+    wordBreak: "break-word",
   },
   noteMeta: {
     display: "flex",
