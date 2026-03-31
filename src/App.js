@@ -80,8 +80,8 @@ function App() {
         right: 10px;
         padding: 4px 8px;
         font-size: 10px;
-        border-radius: 0;
         font-family: monospace;
+        z-index: 1000;
       }
       .connected { background: #4caf50; color: white; }
       .disconnected { background: #f44336; color: white; }
@@ -90,7 +90,7 @@ function App() {
     return () => style.remove();
   }, []);
 
-  // INSTANT SAVE
+  // INSTANT SAVE - appears immediately in UI
   const saveNote = useCallback(async () => {
     if (!note.trim()) {
       setError("write something");
@@ -104,31 +104,32 @@ function App() {
     
     console.log("💾 Saving note:", noteText);
     
-    // Add to UI immediately
+    // OPTIMISTIC UPDATE: Add to UI immediately
     setNotes(prev => [{
       id: tempId,
       text: noteText,
       timestamp: timestamp,
     }, ...prev]);
     
-    setNote("");
+    setNote(""); // Clear input instantly
     setSavingId(tempId);
     setError("");
     
-    // Save to Firebase
+    // Background save to Firebase
     try {
       const docRef = await addDoc(collection(db, "notes"), {
         text: noteText,
         timestamp: timestamp,
       });
-      console.log("✅ Saved! ID:", docRef.id);
+      console.log("✅ Saved to Firebase! ID:", docRef.id);
       
-      // Update with real ID
+      // Update temp note with real Firebase ID
       setNotes(prev => prev.map(n => 
         n.id === tempId ? { ...n, id: docRef.id } : n
       ));
     } catch (err) {
       console.error("❌ Save failed:", err);
+      // Remove the optimistic note on failure
       setNotes(prev => prev.filter(n => n.id !== tempId));
       setError(`Failed: ${err.message}`);
       setTimeout(() => setError(""), 3000);
