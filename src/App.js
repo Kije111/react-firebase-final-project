@@ -81,6 +81,10 @@ function App() {
         0%, 100% { opacity: 1; }
         50% { opacity: 0.3; }
       }
+      
+      button:hover:not(:disabled) {
+        background: #e0d5c8 !important;
+      }
     `;
     document.head.appendChild(style);
     return () => {
@@ -149,7 +153,6 @@ function App() {
     }
   }, [saveNote]);
 
-  // Styles object
   const styles = {
     container: {
       minHeight: "100vh",
@@ -263,13 +266,11 @@ function App() {
   return (
     <div style={styles.container}>
       <div style={styles.content}>
-        {/* Header */}
         <div style={styles.header}>
           <Sparkles size={24} color="#8b7355" />
           <h1 style={styles.title}>notes</h1>
         </div>
 
-        {/* Input */}
         <div style={styles.inputArea}>
           <input
             type="text"
@@ -286,7 +287,6 @@ function App() {
 
         {error && <div style={styles.error}>{error}</div>}
 
-        {/* Comments List */}
         <div style={styles.list}>
           {notes.length === 0 ? (
             <div style={styles.empty}>
